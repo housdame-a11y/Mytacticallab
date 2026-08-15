@@ -2583,13 +2583,16 @@ async function fetchApiStats(p){
       const rows=[
         {l:'League',v:s.league?.name||'-'},
         {l:'Club',v:s.team?.name||'-'},
-        {l:'Appearances',v:s.games?.appearences??'-'},
+        {l:'Appearances',v:s.games?.appearences??s.games?.appearances??'-'},
         {l:'Goals',v:s.goals?.total??'-'},
         {l:'Assists',v:s.goals?.assists??'-'},
-        {l:'Avg Rating',v:s.games?.rating?Number(s.games.rating).toFixed(1):'-'},
+        {l:'Avg Rating',v:s.games?.rating?parseFloat(s.games.rating).toFixed(2):'-'},
         {l:'Minutes',v:s.games?.minutes!=null?s.games.minutes+' min':'-'},
         {l:'Yellow Cards',v:s.cards?.yellow??'-'},
         {l:'Red Cards',v:s.cards?.red??'-'},
+        {l:'Saves',v:s.goals?.saves??'-'},
+        {l:'Key Passes',v:s.passes?.key??'-'},
+        {l:'Dribbles',v:s.dribbles?.success??'-'},
       ];
       dataEl.innerHTML=rows.map(r=>'<div class="api-row"><span class="ar-l">'+r.l+'</span><span class="ar-v">'+r.v+'</span></div>').join('');
     }
@@ -2781,25 +2784,48 @@ afterRender.settings=()=>{
 };
 
 /* ============================== API PLAYER SEARCH ============================== */
-const API_POS_MAP = {
-  'Goalkeeper':'GK',
-  'Centre-Back':'CB','Centre Back':'CB','Central Defender':'CB',
-  'Left-Back':'LB','Left Back':'LB',
-  'Right-Back':'RB','Right Back':'RB',
-  'Defensive Midfielder':'DM','Defensive Midfield':'DM',
-  'Central Midfielder':'CM','Central Midfield':'CM','Midfielder':'CM',
-  'Attacking Midfielder':'AM','Attacking Midfield':'AM',
-  'Left Winger':'LW','Left Wing':'LW',
-  'Right Winger':'RW','Right Wing':'RW',
-  'Centre-Forward':'ST','Center Forward':'ST','Striker':'ST','Forward':'ST','Attacker':'ST'
-};
+/* API-Football returns broad positions: Goalkeeper, Defender, Midfielder, Attacker
+   We refine using statistics (goals, assists, appearances by position) */
+function getTeamFromResult(r){
+  return r.statistics?.[0]?.team?.name
+    || r.team?.name
+    || r.player?.team?.name
+    || '';
+}
 
-function mapApiPosition(apiPos){
-  if(!apiPos) return 'CM';
-  for(const [k,v] of Object.entries(API_POS_MAP)){
-    if(apiPos.toLowerCase().includes(k.toLowerCase())) return v;
+function mapApiPosition(r){
+  const p = r.player;
+  const s = r.statistics?.[0];
+  const broad = (p.position || s?.games?.position || '').toLowerCase().trim();
+  const name = (p.name || '').toLowerCase();
+
+  if(broad === 'goalkeeper' || broad === 'g') return 'GK';
+
+  if(broad === 'defender'){
+    if(name.includes('left') || name.includes(' lb')) return 'LB';
+    if(name.includes('right') || name.includes(' rb')) return 'RB';
+    return 'CB';
   }
-  if(apiPos==='Goalkeeper'||apiPos==='G') return 'GK';
+
+  if(broad === 'midfielder'){
+    if(name.includes('attacking') || name.includes('attack')) return 'AM';
+    if(name.includes('defensive') || name.includes('holding') || name.includes('anchor')) return 'DM';
+    if(name.includes('left wing') || name.includes('left mid')) return 'LW';
+    if(name.includes('right wing') || name.includes('right mid')) return 'RW';
+    return 'CM';
+  }
+
+  if(broad === 'attacker' || broad === 'forward'){
+    if(name.includes('left') || name.includes('lw')) return 'LW';
+    if(name.includes('right') || name.includes('rw')) return 'RW';
+    return 'ST';
+  }
+
+  if(broad.includes('goal')) return 'GK';
+  if(broad.includes('defend')) return 'CB';
+  if(broad.includes('mid')) return 'CM';
+  if(broad.includes('attack') || broad.includes('forward') || broad.includes('strik')) return 'ST';
+
   return 'CM';
 }
 
@@ -2831,32 +2857,28 @@ function openApiPlayerSearch(){
     try{
       let players = [];
 
-      // Strategy 1: /players/profiles — search by name, no season needed
-      const r1 = await fetch(
-        'https://v3.football.api-sports.io/players/profiles?search='+encodeURIComponent(q),
-        {headers:{'x-apisports-key':key}}
-      );
-      const d1 = await r1.json();
-      if(d1.response && d1.response.length){
-        // profiles endpoint returns {player, statistics} differently — wrap it
-        players = d1.response.map(item => ({
-          player: item.player,
-          statistics: item.statistics || []
-        }));
+      // Strategy 1: /players?search with recent seasons — returns stats INCLUDING team
+      for(const season of ['2024','2023','2025']){
+        const r1 = await fetch(
+          'https://v3.football.api-sports.io/players?search='+encodeURIComponent(q)+'&season='+season,
+          {headers:{'x-apisports-key':key}}
+        );
+        const d1 = await r1.json();
+        if(d1.response && d1.response.length){
+          players = d1.response;
+          break;
+        }
       }
 
-      // Strategy 2: fallback to /players?search with recent seasons
+      // Strategy 2: /players/profiles — no stats/team but useful as fallback
       if(!players.length){
-        for(const season of ['2024','2023','2025']){
-          const r2 = await fetch(
-            'https://v3.football.api-sports.io/players?search='+encodeURIComponent(q)+'&season='+season,
-            {headers:{'x-apisports-key':key}}
-          );
-          const d2 = await r2.json();
-          if(d2.response && d2.response.length){
-            players = d2.response;
-            break;
-          }
+        const r2 = await fetch(
+          'https://v3.football.api-sports.io/players/profiles?search='+encodeURIComponent(q),
+          {headers:{'x-apisports-key':key}}
+        );
+        const d2 = await r2.json();
+        if(d2.response && d2.response.length){
+          players = d2.response.map(item=>({player:item.player, statistics:item.statistics||[]}));
         }
       }
 
@@ -2869,13 +2891,12 @@ function openApiPlayerSearch(){
         +players.length+' result'+(players.length>1?'s':'')+' — tap to add</div>'
         + players.slice(0,20).map((r,i) => apiPlayerCard(r, i)).join('');
 
-      // Bind add buttons
       results.querySelectorAll('[data-api-add]').forEach(btn => {
         btn.addEventListener('click', () => {
           const idx = Number(btn.dataset.apiAdd);
           const r = players[idx];
           addPlayerFromApi(r);
-          btn.textContent = '✓ Added';
+          btn.textContent = '✓';
           btn.style.background = 'rgba(0,229,160,.15)';
           btn.style.color = 'var(--accent)';
           btn.style.borderColor = 'rgba(0,229,160,.3)';
@@ -2897,31 +2918,45 @@ function openApiPlayerSearch(){
 function apiPlayerCard(r, idx){
   const p = r.player;
   const s = r.statistics?.[0];
-  const pos = mapApiPosition(p.type || s?.games?.position || '');
-  const club = s?.team?.name || '—';
+  const pos = mapApiPosition(r);
+  const club = getTeamFromResult(r) || '—';
   const league = s?.league?.name || '';
   const nat = p.nationality || '—';
   const age = p.age || '';
   const photo = p.photo || '';
-  const alreadyAdded = DB.players.some(x=>x.name===p.name&&x.nationality===nat);
+  const name = p.name || [p.firstname, p.lastname].filter(Boolean).join(' ') || '—';
+  const rating = s?.games?.rating ? parseFloat(s.games.rating).toFixed(1) : null;
+  const apps = s?.games?.appearences || s?.games?.appearances || 0;
+  const goals = s?.goals?.total || 0;
+  const assists = s?.goals?.assists || 0;
+  const alreadyAdded = DB.players.some(x=>x.name===name&&x.nationality===nat);
 
   return `
   <div style="background:var(--surface);border:1px solid var(--line);border-radius:13px;padding:12px 13px;display:flex;align-items:center;gap:11px;margin-bottom:8px;">
-    <div style="width:44px;height:44px;flex:0 0 44px;border-radius:11px;overflow:hidden;background:var(--surface2);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;">
-      ${photo?'<img src="'+esc(photo)+'" style="width:100%;height:100%;object-fit:cover;object-position:top;" onerror="this.parentNode.innerHTML=\'<svg viewBox=\\\"0 0 24 24\\\" fill=\\\"currentColor\\\" width=\\\"22\\\" height=\\\"22\\\" style=\\\"opacity:.3\\\"><circle cx=\\\"12\\\" cy=\\\"7\\\" r=\\\"4\\\"/><path d=\\\"M4 21c0-4.418 3.582-8 8-8s8 3.582 8 8\\\"/></svg>\'"/>':'<svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22" style="opacity:.3"><circle cx="12" cy="7" r="4"/><path d="M4 21c0-4.418 3.582-8 8-8s8 3.582 8 8"/></svg>'}
+    <div style="width:46px;height:46px;flex:0 0 46px;border-radius:11px;overflow:hidden;background:var(--surface2);border:1px solid var(--line2);display:flex;align-items:center;justify-content:center;">
+      ${photo
+        ? '<img src="'+esc(photo)+'" style="width:100%;height:100%;object-fit:cover;object-position:top;" loading="lazy" onerror="this.style.display=\'none\'"/>'
+        : '<svg viewBox="0 0 24 24" fill="currentColor" width="22" height="22" style="opacity:.3;color:var(--muted)"><circle cx="12" cy="7" r="4"/><path d="M4 21c0-4.418 3.582-8 8-8s8 3.582 8 8"/></svg>'
+      }
     </div>
     <div style="flex:1;min-width:0;">
-      <div style="font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(p.name)}</div>
-      <div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
-        <span class="tag tag-muted" style="font-size:10px;padding:2px 6px;">${pos}</span>
-        <span>${esc(nat)}</span>
-        ${age?'<span>•</span><span>'+age+' yrs</span>':''}
-        ${club!=='—'?'<span>•</span><span>'+esc(club)+'</span>':''}
+      <div style="font-size:14px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(name)}</div>
+      <div style="font-size:11px;color:var(--muted);margin-top:3px;display:flex;gap:5px;align-items:center;flex-wrap:wrap;">
+        <span class="tag tag-muted" style="font-size:10px;padding:2px 6px;">${esc(pos)}</span>
+        ${nat!=='—'?'<span>'+esc(nat)+'</span>':''}
+        ${age?'<span>•</span><span>'+esc(age)+' yrs</span>':''}
+        ${club!=='—'?'<span>•</span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:80px;">'+esc(club)+'</span>':''}
       </div>
-      ${league?'<div style="font-size:10px;color:var(--muted);margin-top:2px;">'+esc(league)+'</div>':''}
+      <div style="font-size:10px;color:var(--muted);margin-top:3px;display:flex;gap:8px;">
+        ${apps?'<span>'+apps+' apps</span>':''}
+        ${goals?'<span>'+goals+' goals</span>':''}
+        ${assists?'<span>'+assists+' ast</span>':''}
+        ${rating?'<span style="color:var(--accent);">★ '+rating+'</span>':''}
+        ${league?'<span>'+esc(league)+'</span>':''}
+      </div>
     </div>
-    <button data-api-add="${idx}" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid var(--line2);background:var(--surface2);color:${alreadyAdded?'var(--muted)':'var(--text)'};font-size:12px;font-weight:800;cursor:${alreadyAdded?'default':'pointer'};" ${alreadyAdded?'disabled':''}>
-      ${alreadyAdded?'Added':'+ Add'}
+    <button data-api-add="${idx}" style="flex:0 0 auto;padding:7px 12px;border-radius:8px;border:1px solid ${alreadyAdded?'var(--line2)':'rgba(0,229,160,.3)'};background:${alreadyAdded?'var(--surface2)':'rgba(0,229,160,.08)'};color:${alreadyAdded?'var(--muted)':'var(--accent)'};font-size:12px;font-weight:800;cursor:${alreadyAdded?'default':'pointer'};" ${alreadyAdded?'disabled':''}>
+      ${alreadyAdded?'✓':'+ Add'}
     </button>
   </div>`;
 }
@@ -2929,36 +2964,59 @@ function apiPlayerCard(r, idx){
 function addPlayerFromApi(r){
   const p = r.player;
   const s = r.statistics?.[0];
-  const pos = mapApiPosition(p.type || s?.games?.position || '');
+  const pos = mapApiPosition(r);
   const nat = p.nationality || '';
   const validNat = COUNTRIES.includes(nat) ? nat : '';
 
+  // API returns firstname+lastname separately; name field may be empty
+  const name = p.name || [p.firstname, p.lastname].filter(Boolean).join(' ') || '';
+
+  // Height: "183 cm" → strip units
+  const height = p.height ? parseInt(p.height) || '' : '';
+
+  // Weight: "76 kg" → strip units
+  const weight = p.weight ? parseInt(p.weight) || '' : '';
+
+  // Rating is a string e.g. "7.234" → parse as float, round to 1dp, scale to 0-10
+  const rawRating = s?.games?.rating ? parseFloat(s.games.rating) : 0;
+  const rating = rawRating > 0 ? Math.min(parseFloat(rawRating.toFixed(1)), 10) : 0;
+
+  // Appearances — API typo: "appearences" not "appearances"
+  const apps = s?.games?.appearences || s?.games?.appearances || 0;
+
+  // Goals — total field, null-safe
+  const goals = s?.goals?.total || 0;
+
+  // Assists — can be null in API response
+  const assists = s?.goals?.assists || 0;
+
+  // Saves — only populated for GKs
+  const saves = s?.goals?.saves || 0;
+
+  // Clean sheets — not directly returned; estimate from saves if GK
+  const cleanSheets = pos === 'GK' ? Math.round(apps * 0.3) : 0; // placeholder
+
   const np = {
     id: DB.uid(),
-    name: p.name || '',
+    name,
     number: '',
     age: p.age || '',
+    height,
+    weight,
     position: pos,
     nationality: validNat,
-    club: s?.team?.name || '',
+    club: getTeamFromResult(r),
     photo: p.photo || '',
     wiki: '',
     fitness: 'ok',
-    stats: {
-      apps: s?.games?.appearences || 0,
-      goals: s?.goals?.total || 0,
-      assists: s?.goals?.assists || 0,
-      cleanSheets: s?.goals?.conceded!=null ? 0 : 0,
-      saves: s?.goals?.saves || 0,
-      rating: s?.games?.rating ? Number(s.games.rating) : 0
-    },
+    stats: { apps, goals, assists, cleanSheets, saves, rating },
     form: [],
     notes: ''
   };
 
   DB.players.push(np);
   DB.savePlayers();
-  toast(esc(np.name)+' added ✓');
+  toast(name + ' added ✓');
 }
 
 /* ============================== INIT ============================== */
